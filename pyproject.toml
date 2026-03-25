@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "schulmanager-discord-bot"
+version = "0.1.0"
+description = "Discord bot for Schulmanager API"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+  { name = "Leo" }
+]
+dependencies = [
+  "discord.py>=2.4.0,<3.0.0",
+  "httpx>=0.27.0,<1.0.0",
+  "pydantic-settings>=2.3.0,<3.0.0",
+  "aiosqlite>=0.20.0,<1.0.0",
+  "tzdata>=2024.1,<2027.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.2.0,<9.0.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

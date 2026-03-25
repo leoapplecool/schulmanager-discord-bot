@@ -1,0 +1,12 @@
+services:
+  discord-bot:
+    build: .
+    env_file: .env
+    environment:
+      SM_DISCORD_API_BASE_URL: http://host.docker.internal:8000
+    volumes:
+      - bot-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  bot-data:
