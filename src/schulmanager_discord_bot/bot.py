@@ -707,7 +707,6 @@ class SchulmanagerCog(commands.Cog):
 
         await interaction.response.defer(ephemeral=True, thinking=True)
 
-        # Delete category and all channels
         if state.category_id:
             category = interaction.guild.get_channel(state.category_id)
             if isinstance(category, discord.CategoryChannel):
@@ -779,7 +778,6 @@ class SchulmanagerCog(commands.Cog):
         if record is None:
             return
 
-        # Only the owning user can toggle done state
         if payload.user_id != record.user_id:
             return
 
@@ -802,10 +800,6 @@ class SchulmanagerCog(commands.Cog):
         except discord.NotFound:
             return
 
-        # Re-render the homework item with updated done status
-        # We need to retrieve the item from the homework embed content
-        # Use the fingerprint to determine if we already have the right state
-        # Fetch payloads to get current data
         try:
             state = await self._ensure_valid_tokens(state)
             tz = resolve_timezone(self.settings.discord_timezone)
@@ -854,6 +848,48 @@ class SchulmanagerCog(commands.Cog):
     @sync_loop.before_loop
     async def before_sync_loop(self) -> None:
         await self.bot.wait_until_ready()
+        # ── FIX: Auto-relogin aller User beim Start ──────────────────────────
+        # Nach einem API-Neustart sind alle Selenium-Sessions weg.
+        # Wir loggen alle aktiven User neu ein bevor der erste Sync startet.
+        await self._relogin_all_users_on_startup()
+
+    async def _relogin_all_users_on_startup(self) -> None:
+        """Beim Start alle aktiven User neu in die API einloggen um die Selenium-Session wiederherzustellen."""
+        users = await self.store.list_active_users()
+        if not users:
+            return
+
+        LOGGER.info("Startup relogin: %d aktive User werden neu eingeloggt", len(users))
+        for state in users:
+            if not state.password:
+                LOGGER.warning(
+                    "Startup relogin: kein Passwort gespeichert für guild=%s user=%s – übersprungen",
+                    state.guild_id, state.user_id,
+                )
+                continue
+            try:
+                login_response = await self.api.login(email=state.email, password=state.password)
+                now_ts = int(time.time())
+                updated = replace(
+                    state,
+                    account_id=login_response.account_id,
+                    access_token=login_response.access_token,
+                    refresh_token=login_response.refresh_token,
+                    access_expires_at=now_ts + max(login_response.expires_in, 1),
+                    refresh_expires_at=now_ts + max(login_response.refresh_expires_in, 1),
+                    active=True,
+                    last_error=None,
+                )
+                await self.store.upsert_user(updated)
+                LOGGER.info(
+                    "Startup relogin erfolgreich für guild=%s user=%s",
+                    state.guild_id, state.user_id,
+                )
+            except ApiClientError as exc:
+                LOGGER.warning(
+                    "Startup relogin fehlgeschlagen für guild=%s user=%s: %s",
+                    state.guild_id, state.user_id, exc,
+                )
 
     @tasks.loop(minutes=5)
     async def reminder_loop(self) -> None:
@@ -889,7 +925,6 @@ class SchulmanagerCog(commands.Cog):
         except (ValueError, AttributeError):
             digest_hour, digest_minute = 7, 0
 
-        # Fire within 30-minute window of the configured time
         if now.hour != digest_hour or not (0 <= now.minute < 30 and digest_minute < 30) and not (30 <= now.minute and digest_minute >= 30):
             if now.hour != digest_hour or abs(now.minute - digest_minute) > 30:
                 return
@@ -919,7 +954,6 @@ class SchulmanagerCog(commands.Cog):
     async def _process_schedule_change_dms(
         self, state: UserWorkspaceState, schedule: list[dict[str, Any]]
     ) -> None:
-        """DM the user when new lesson cancellations/substitutions are detected."""
         pref_enabled = await self.store.get_notification_pref(
             state.guild_id, state.user_id, "schedule_changes", default=True
         )
@@ -1097,17 +1131,10 @@ class SchulmanagerCog(commands.Cog):
         today_str = today.isoformat()
         next_7 = today + timedelta(days=7)
 
-        # Today's schedule
         today_schedule = [d for d in schedule_raw if d.get("date") == today_str]
         today_lessons = today_schedule[0].get("lessons", []) if today_schedule else []
-
-        # Homework due today
         today_hw = [hw for hw in homework_raw if hw.get("due_date") == today_str and not hw.get("done")]
-
-        # Exams in next 7 days
         upcoming_exams = [e for e in exams_raw if today_str <= str(e.get("date") or "") <= next_7.isoformat()]
-
-        # New grades (last 24h - approximate by checking dates)
         yesterday_str = (today - timedelta(days=1)).isoformat()
         recent_grades = [g for g in grades_raw if str(g.get("date") or "") >= yesterday_str]
 
@@ -1118,7 +1145,6 @@ class SchulmanagerCog(commands.Cog):
         )
         embed.set_author(name=state.student_name)
 
-        # Today's lessons
         if today_lessons:
             lesson_lines: list[str] = []
             for lesson in today_lessons[:6]:
@@ -1131,12 +1157,10 @@ class SchulmanagerCog(commands.Cog):
         else:
             embed.add_field(name="📅 Heute", value="Keine Stunden", inline=False)
 
-        # Homework due today
         if today_hw:
             hw_lines = [f"• **{hw.get('subject', 'Fach')}**: {str(hw.get('text', ''))[:80]}" for hw in today_hw[:5]]
             embed.add_field(name=f"📚 Heute fällig ({len(today_hw)})", value="\n".join(hw_lines), inline=False)
 
-        # Upcoming exams
         if upcoming_exams:
             exam_lines: list[str] = []
             for exam in upcoming_exams[:5]:
@@ -1149,7 +1173,6 @@ class SchulmanagerCog(commands.Cog):
                 exam_lines.append(f"• {time_str} **{exam.get('subject', 'Fach')}** — {exam.get('topic', '-')}")
             embed.add_field(name=f"📝 Prüfungen (7 Tage, {len(upcoming_exams)})", value="\n".join(exam_lines), inline=False)
 
-        # Recent grades
         if recent_grades:
             grade_lines = [f"• **{g.get('subject', 'Fach')}**: {g.get('grade', '?')} {g.get('comment', '')}" for g in recent_grades[:5]]
             embed.add_field(name=f"📊 Neue Noten ({len(recent_grades)})", value="\n".join(grade_lines), inline=False)
@@ -1375,6 +1398,17 @@ class SchulmanagerCog(commands.Cog):
         )
         return updated
 
+    @staticmethod
+    def _data_looks_empty(data: dict[str, Any]) -> bool:
+        """Prüft ob alle Schulmanager-Daten leer sind – ein Zeichen für eine abgelaufene Session."""
+        return (
+            not data.get("grades")
+            and not data.get("events")
+            and not data.get("homework")
+            and not data.get("absences")
+            and not data.get("messages")
+        )
+
     async def _fetch_payloads(self, state: UserWorkspaceState, *, force_refresh: bool) -> dict[str, Any]:
         tz = resolve_timezone(self.settings.discord_timezone)
         today = datetime.now(tz).date()
@@ -1399,13 +1433,47 @@ class SchulmanagerCog(commands.Cog):
             }
 
         try:
-            return await fetch_once(state.access_token)
+            data = await fetch_once(state.access_token)
         except ApiClientError as exc:
             if exc.status_code != 401:
                 raise
             refreshed = await self._ensure_valid_tokens(replace(state, access_expires_at=0))
             await self.store.upsert_user(refreshed)
-            return await fetch_once(refreshed.access_token)
+            data = await fetch_once(refreshed.access_token)
+
+        # ── FIX: Leere Daten erkennen und Selenium-Session erneuern ──────────
+        # Wenn alle wichtigen Felder leer sind, ist die Schulmanager-Session
+        # wahrscheinlich abgelaufen. Wir loggen neu ein und versuchen es nochmal.
+        if self._data_looks_empty(data) and state.password:
+            LOGGER.info(
+                "Alle Daten leer für guild=%s user=%s – versuche erneuten Login",
+                state.guild_id, state.user_id,
+            )
+            try:
+                login_response = await self.api.login(email=state.email, password=state.password)
+                now_ts = int(time.time())
+                refreshed_state = replace(
+                    state,
+                    account_id=login_response.account_id,
+                    access_token=login_response.access_token,
+                    refresh_token=login_response.refresh_token,
+                    access_expires_at=now_ts + max(login_response.expires_in, 1),
+                    refresh_expires_at=now_ts + max(login_response.refresh_expires_in, 1),
+                )
+                await self.store.upsert_user(refreshed_state)
+                # Nochmal abrufen mit neuem Token und force_refresh=True
+                data = await fetch_once(refreshed_state.access_token)
+                LOGGER.info(
+                    "Erneuter Login erfolgreich für guild=%s user=%s – Daten neu geladen",
+                    state.guild_id, state.user_id,
+                )
+            except ApiClientError as exc:
+                LOGGER.warning(
+                    "Erneuter Login nach leeren Daten fehlgeschlagen für guild=%s user=%s: %s",
+                    state.guild_id, state.user_id, exc,
+                )
+
+        return data
 
     async def _publish_payloads(self, guild: discord.Guild, state: UserWorkspaceState, payloads: dict[str, Any]) -> dict[str, list[str]]:
         changes: dict[str, list[str]] = {
@@ -1453,7 +1521,6 @@ class SchulmanagerCog(commands.Cog):
             )
             changes[kind] = updates
 
-        # Grade stats embed in grades channel (secondary persistent embed)
         grades_channel = self._get_channel(guild, state.grades_channel_id)
         if grades_channel is not None and grade_stats_items:
             stats_updates = await self._sync_channel_embeds(
@@ -1466,7 +1533,6 @@ class SchulmanagerCog(commands.Cog):
             if stats_updates:
                 changes["grades"].extend(stats_updates)
 
-        # Homework: one message per item
         homework_channel = self._get_channel(guild, state.homework_channel_id)
         if homework_channel is not None:
             hw_updates = await self._sync_homework_items_channel(
@@ -1478,7 +1544,6 @@ class SchulmanagerCog(commands.Cog):
             )
             changes["homework"] = hw_updates
 
-        # Messages channel
         messages_channel = self._get_channel(guild, state.messages_channel_id)
         if messages_channel is not None:
             msg_updates = await self._sync_channel_embeds(
@@ -1490,7 +1555,6 @@ class SchulmanagerCog(commands.Cog):
             )
             changes["messages"] = msg_updates
 
-        # Events channel
         events_channel = self._get_channel(guild, state.events_channel_id)
         if events_channel is not None:
             event_updates = await self._sync_channel_embeds(
@@ -1530,7 +1594,6 @@ class SchulmanagerCog(commands.Cog):
         homework_items: list[dict[str, Any]],
         schedule_days: list[dict[str, Any]],
     ) -> list[str]:
-        """Sync per-item homework messages. One message per homework item."""
         existing = {
             row.item_key: row
             for row in await self.store.list_embed_records(guild_id, user_id, HOMEWORK_ITEM_KIND)
@@ -1539,7 +1602,6 @@ class SchulmanagerCog(commands.Cog):
 
         changes: list[str] = []
         incoming_keys: set[str] = set()
-        today = datetime.now(timezone.utc).date()
 
         for item in homework_items:
             if not isinstance(item, dict):
@@ -1554,7 +1616,7 @@ class SchulmanagerCog(commands.Cog):
 
             record = existing.get(item_id)
             if record and record.fingerprint == rendered.fingerprint:
-                continue  # No change
+                continue
 
             if record:
                 try:
@@ -1563,7 +1625,6 @@ class SchulmanagerCog(commands.Cog):
                     await self.store.upsert_embed_record(guild_id, user_id, HOMEWORK_ITEM_KIND, item_id, message.id, rendered.fingerprint)
                     changes.append(f"{item_id}:updated")
                 except discord.NotFound:
-                    # Re-create
                     message = await channel.send(embed=rendered.embed)
                     try:
                         await message.add_reaction(DONE_EMOJI)
@@ -1582,13 +1643,9 @@ class SchulmanagerCog(commands.Cog):
 
             await asyncio.sleep(0.3)
 
-        # Handle stale items
         stale_keys = [key for key in existing if key not in incoming_keys]
         for key in stale_keys:
             record = existing[key]
-            done = done_states.get(key, False)
-            # Auto-archive done items past due date: delete message but keep DB record
-            # For undone stale items: delete message and DB record
             try:
                 message = await channel.fetch_message(record.message_id)
                 await message.delete()
