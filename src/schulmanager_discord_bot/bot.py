@@ -17,6 +17,7 @@ from schulmanager_discord_bot.config import Settings
 from schulmanager_discord_bot.api_client import ApiClientError, LoginResponse, SchulmanagerApiClient
 from schulmanager_discord_bot.embeds import (
     RenderedEmbed,
+    _fingerprint,
     compact_rendered,
     render_absences,
     render_events,
@@ -848,9 +849,6 @@ class SchulmanagerCog(commands.Cog):
     @sync_loop.before_loop
     async def before_sync_loop(self) -> None:
         await self.bot.wait_until_ready()
-        # ── FIX: Auto-relogin aller User beim Start ──────────────────────────
-        # Nach einem API-Neustart sind alle Selenium-Sessions weg.
-        # Wir loggen alle aktiven User neu ein bevor der erste Sync startet.
         await self._relogin_all_users_on_startup()
 
     async def _relogin_all_users_on_startup(self) -> None:
@@ -1180,7 +1178,22 @@ class SchulmanagerCog(commands.Cog):
         if not embed.fields:
             embed.description = "Heute keine besonderen Ereignisse."
 
-        await channel.send(embed=embed)
+        # Fingerprint basiert auf Datum + tatsächlichem Inhalt damit bei Änderungen
+        # tagsüber (z.B. neue Hausaufgabe) der Embed aktualisiert wird statt neu gesendet
+        fp_data = {
+            "date": today_str,
+            "lessons": len(today_lessons),
+            "hw": len(today_hw),
+            "exams": len(upcoming_exams),
+            "grades": len(recent_grades),
+            "hw_texts": [str(hw.get("text", ""))[:80] for hw in today_hw[:5]],
+            "exam_subjects": [str(e.get("subject", "")) for e in upcoming_exams[:5]],
+            "grade_subjects": [str(g.get("subject", "")) for g in recent_grades[:5]],
+        }
+        fingerprint = "digest-v1:" + _fingerprint(fp_data)[:16]
+
+        item = RenderedEmbed(key="digest", embed=embed, fingerprint=fingerprint)
+        await self._upsert_embed(state.guild_id, state.user_id, channel, "status", item)
 
     # ─── Sync internals ───────────────────────────────────────────────────────
 
@@ -1441,9 +1454,6 @@ class SchulmanagerCog(commands.Cog):
             await self.store.upsert_user(refreshed)
             data = await fetch_once(refreshed.access_token)
 
-        # ── FIX: Leere Daten erkennen und Selenium-Session erneuern ──────────
-        # Wenn alle wichtigen Felder leer sind, ist die Schulmanager-Session
-        # wahrscheinlich abgelaufen. Wir loggen neu ein und versuchen es nochmal.
         if self._data_looks_empty(data) and state.password:
             LOGGER.info(
                 "Alle Daten leer für guild=%s user=%s – versuche erneuten Login",
@@ -1461,7 +1471,6 @@ class SchulmanagerCog(commands.Cog):
                     refresh_expires_at=now_ts + max(login_response.refresh_expires_in, 1),
                 )
                 await self.store.upsert_user(refreshed_state)
-                # Nochmal abrufen mit neuem Token und force_refresh=True
                 data = await fetch_once(refreshed_state.access_token)
                 LOGGER.info(
                     "Erneuter Login erfolgreich für guild=%s user=%s – Daten neu geladen",
