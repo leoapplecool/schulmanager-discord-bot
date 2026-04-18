@@ -1481,6 +1481,7 @@ class SchulmanagerCog(commands.Cog):
                     "Erneuter Login nach leeren Daten fehlgeschlagen für guild=%s user=%s: %s",
                     state.guild_id, state.user_id, exc,
                 )
+                raise
 
         return data
 
